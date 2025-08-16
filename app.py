@@ -257,9 +257,9 @@ if kb_texts:
     except Exception as e:
         st.warning(f"RAG build failed: {e}. Using keyword fallback.")
 
-# --- INPUT WIDGET ---
+# --- Initialize session state safely ---
 if "incident_input" not in st.session_state:
-    st.session_state["incident_input"] = ""  # initialize
+    st.session_state["incident_input"] = ""
 
 incident_input = st.text_area("Paste telemetry/logs:", height=240, key="incident_input")
 
@@ -280,11 +280,11 @@ if st.button("Run Predictive Analysis"):
 
 # --- LOAD EXAMPLE ---
 if st.button("Load example incident"):
-    st.session_state.incident_input = (
+    st.session_state["incident_input"] = (
         "Node: server-23\n"
         "Metric: disk_read_latency_ms=45 (baseline 5ms), disk_write_latency_ms=80 (baseline 7ms)\n"
         "SMART: reallocated_sector_count=120, current_pending_sector=4\n"
         "Event: repeated soft ECC errors reported on channel A\n"
         "Recent change: firmware update to storage controller 2 days ago\n"
     )
-    st.experimental_rerun()
+    st.rerun()
