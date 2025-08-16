@@ -1,7 +1,7 @@
 streamlit
 aiohttp
 python-dotenv
-pypdf
+pypdf2
 sentence-transformers
 faiss-cpu
 numpy
