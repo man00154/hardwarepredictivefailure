@@ -42,7 +42,14 @@ def gemini_generate(api_key, prompt, max_output_tokens=600):
     try:
         resp = requests.post(API_URL, headers=headers, params=params, json=payload, timeout=60)
         data = resp.json()
-        return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+
+        # ✅ Safer parsing
+        if "candidates" in data and data["candidates"]:
+            cand = data["candidates"][0]
+            if "content" in cand and "parts" in cand["content"] and cand["content"]["parts"]:
+                return cand["content"]["parts"][0].get("text", "").strip()
+        # If Gemini error
+        return f"⚠️ Gemini API returned no text. Full response: {json.dumps(data, indent=2)}"
     except Exception as e:
         return f"⚠️ No valid response from Gemini: {str(e)}"
 
@@ -113,13 +120,3 @@ if st.button("Run Analysis"):
             report = agentic_pipeline(api_key, incident_input.strip(), rag)
         st.subheader("📄 Predictive RCA Report")
         st.markdown(report)
-
-# Example Incident
-if st.button("Load Example Incident"):
-    st.session_state.incident_input = (
-        "Node: server-42\n"
-        "Disk I/O latency spikes, SMART errors detected\n"
-        "Temperature higher than threshold\n"
-        "Fan speed anomalies in last 24 hours\n"
-    )
-    st.experimental_rerun()
