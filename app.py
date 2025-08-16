@@ -48,16 +48,16 @@ def gemini_generate(api_key, prompt, max_tokens=300):
 
 # ---------- Streamlit UI ----------
 st.set_page_config(page_title="Predictive Hardware Failure RCA", layout="wide")
-st.title("🔧 MANISH SINGH -  Predictive Hardware Failure RCA")
+st.title("🔧 MANISH SINGH - Predictive Hardware Failure RCA")
 
-with st.sidebar:
-    api_key = st.text_input("Enter GEMINI_API_KEY", type="password") or get_api_key()
+# Get API key automatically (no manual entry)
+api_key = get_api_key()
 
 incident_input = st.text_area("Paste a simple hardware log:", height=150)
 
 if st.button("Run RCA"):
     if not api_key:
-        st.error("Please provide GEMINI_API_KEY.")
+        st.error("Please set GEMINI_API_KEY in environment or Streamlit secrets.")
     elif not incident_input.strip():
         st.warning("Please paste a log.")
     else:
