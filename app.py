@@ -6,6 +6,7 @@ import asyncio
 import aiohttp
 import streamlit as st
 from typing import List, Dict, Any, Optional
+from PyPDF2 import PdfReader
 
 # ---------- Gemini config ----------
 MODEL_NAME = "gemini-2.5-flash-preview-05-20"
@@ -48,7 +49,7 @@ def safe_trim(text: str, max_chars: int):
         return ""
     return text if len(text) <= max_chars else text[:max_chars] + "\n...[truncated]"
 
-# ---------- RAG (tries to use sentence-transformers + faiss, else fallback) ----------
+# ---------- RAG ----------
 class SimpleRAG:
     def __init__(self, model_name: str = "sentence-transformers/all-MiniLM-L6-v2"):
         self.model_name = model_name
@@ -56,11 +57,9 @@ class SimpleRAG:
         self.emb_model = None
         self.index = None
         self.using_faiss = False
-
-        # try imports lazily
         try:
-            import sentence_transformers  # noqa: F401
-            import faiss  # noqa: F401
+            import sentence_transformers  # noqa
+            import faiss  # noqa
             self.using_faiss = True
         except Exception:
             self.using_faiss = False
@@ -72,16 +71,10 @@ class SimpleRAG:
             self.docs.append({"text": t, "metadata": m})
 
     def build(self):
-        if not self.docs:
+        if not self.docs or not self.using_faiss:
             return
-        if not self.using_faiss:
-            # nothing to build for keyword fallback
-            return
-        # build embeddings + faiss index
         from sentence_transformers import SentenceTransformer
-        import numpy as np
-        import faiss
-
+        import numpy as np, faiss
         self.emb_model = SentenceTransformer(self.model_name)
         corpus = [d["text"] for d in self.docs]
         embeddings = self.emb_model.encode(corpus, show_progress_bar=False, convert_to_numpy=True, normalize_embeddings=True)
@@ -90,7 +83,6 @@ class SimpleRAG:
         self.index.add(embeddings.astype("float32"))
 
     def similarity_search(self, query: str, k: int = 5) -> List[Dict[str, Any]]:
-        # If faiss available, use vector search; otherwise fallback to simple substring match
         if self.using_faiss and self.index is not None:
             q_emb = self.emb_model.encode([query], show_progress_bar=False, convert_to_numpy=True, normalize_embeddings=True).astype("float32")
             D, I = self.index.search(q_emb, k)
@@ -100,7 +92,6 @@ class SimpleRAG:
                     continue
                 results.append({"text": self.docs[int(idx)]["text"], "metadata": self.docs[int(idx)].get("metadata", {}), "score": float(score)})
             return results
-        # fallback: keyword match scoring
         q = query.lower().split()
         scored = []
         for d in self.docs:
@@ -111,203 +102,142 @@ class SimpleRAG:
         scored.sort(key=lambda x: -x[0])
         return [{"text": d["text"], "metadata": d.get("metadata", {}), "score": float(s)} for s, d in scored[:k]]
 
-# ---------- Gemini client with retries and safe parsing ----------
-async def gemini_generate_async(
-    api_key: str,
-    user_prompt: str,
-    system_prompt: Optional[str] = None,
-    temperature: float = 0.2,
-    max_output_tokens: int = 1200,
-    retries: int = 2,
-) -> str:
+# ---------- Gemini client ----------
+async def gemini_generate_async(api_key: str, user_prompt: str, system_prompt: Optional[str] = None,
+                                temperature: float = 0.2, max_output_tokens: int = 1200, retries: int = 2) -> str:
     headers = {"Content-Type": "application/json"}
     params = {"key": api_key}
-
-    concise_guardrail = (
-        "Be concise and fit within token limits. Use explicit sections: Root Cause, Evidence, Prediction, Immediate Action, Long-term Mitigation."
-    )
+    concise_guardrail = "Be concise. Use explicit sections: Root Cause, Prediction, Evidence, Immediate Action, Long-term Mitigation."
 
     for attempt in range(retries + 1):
         effective_max = max(256, int(max_output_tokens * (0.7 ** attempt)))
         parts = []
         if system_prompt:
-            parts.append({"text": f"[SYSTEM]\n{system_prompt}\n\n{concise_guardrail}".strip()})
+            parts.append({"text": f"[SYSTEM]\n{system_prompt}\n\n{concise_guardrail}"})
         else:
             parts.append({"text": concise_guardrail})
         parts.append({"text": user_prompt})
-        payload = {
-            "contents": [{"role": "user", "parts": parts}],
-            "generationConfig": {
-                "temperature": temperature,
-                "maxOutputTokens": effective_max,
-                "responseMimeType": "text/plain",
-            },
-        }
-
+        payload = {"contents": [{"role": "user", "parts": parts}],
+                   "generationConfig": {"temperature": temperature,
+                                        "maxOutputTokens": effective_max,
+                                        "responseMimeType": "text/plain"}}
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(API_URL, headers=headers, params=params, json=payload, timeout=120) as resp:
                     text_body = await resp.text()
                     if resp.status != 200:
-                        # retry on transient errors
                         if resp.status in (429, 500, 502, 503, 504) and attempt < retries:
                             await asyncio.sleep(2 ** attempt)
                             continue
                         raise RuntimeError(f"Gemini API error {resp.status}: {text_body}")
                     data = json.loads(text_body)
-                    # try to extract generated text safely
                     try:
-                        candidate = data.get("candidates", [None])[0]
-                        if candidate and isinstance(candidate, dict):
-                            content = candidate.get("content", {})
-                            parts = content.get("parts", [])
-                            if parts and isinstance(parts, list) and "text" in parts[0]:
-                                txt = parts[0]["text"]
-                                if txt and txt.strip():
-                                    return txt
+                        candidate = data.get("candidates", [{}])[0]
+                        if "content" in candidate and "parts" in candidate["content"]:
+                            for part in candidate["content"]["parts"]:
+                                if "text" in part and part["text"].strip():
+                                    return part["text"].strip()
                     except Exception:
                         pass
-                    # If we get here, maybe truncated/finishReason; retry a smaller output token budget
-                    finish_reason = None
-                    try:
-                        finish_reason = data.get("candidates", [{}])[0].get("finishReason")
-                    except Exception:
-                        finish_reason = None
-                    if attempt < retries and finish_reason == "MAX_TOKENS":
+                    finish_reason = data.get("candidates", [{}])[0].get("finishReason", "")
+                    if finish_reason == "MAX_TOKENS" and attempt < retries:
                         await asyncio.sleep(1.5 * (attempt + 1))
                         continue
-                    # fallback: return pretty JSON so user can inspect
-                    return json.dumps(data, indent=2)
+                    return "No text generated (likely due to token limit)."
         except aiohttp.ClientError as e:
             if attempt < retries:
                 await asyncio.sleep(1.5 * (attempt + 1))
                 continue
-            return f"Network error contacting Gemini API: {e}"
+            return f"Network error: {e}"
     return "Failed to get response from Gemini API."
 
 def gemini_generate(*args, **kwargs) -> str:
     return try_run(gemini_generate_async(*args, **kwargs))
 
-# ---------- Agentic pipeline for predictive hardware failure ----------
+# ---------- Agentic pipeline ----------
 def agentic_predictive_pipeline(api_key: str, incident: str, rag: SimpleRAG, temperature: float = 0.2) -> str:
-    # 1) generate short hypotheses
-    hypo_prompt = f"""You are a senior data center reliability engineer. Provide 3 concise hypotheses (1 line each) about what hardware failures or precursors might explain the following telemetry/logs. Be brief.
+    hypo_prompt = f"You are a data center engineer. Give 3 short hypotheses for the incident:\n{incident}"
+    hypotheses = gemini_generate(api_key=api_key, user_prompt=hypo_prompt, system_prompt="Generate 3 short hypotheses.",
+                                 temperature=temperature, max_output_tokens=200)
 
-Incident/Telemetry:
-{incident}
-"""
-    hypotheses = gemini_generate(api_key=api_key, user_prompt=hypo_prompt, system_prompt="Generate 3 short hypotheses.", temperature=temperature, max_output_tokens=200)
+    qry_prompt = f"From these hypotheses, make up to 5 search queries (one per line):\n{hypotheses}"
+    queries_text = gemini_generate(api_key=api_key, user_prompt=qry_prompt, system_prompt="Output queries only.",
+                                   temperature=0.1, max_output_tokens=200)
+    queries = [q.strip() for q in queries_text.splitlines() if q.strip()][:5]
 
-    # 2) generate up to 5 focused queries for RAG retrieval
-    qry_prompt = f"""From these hypotheses, produce up to 5 short keyword queries suitable for searching logs or KB for evidence. Output one query per line.
-
-Hypotheses:
-{hypotheses}
-"""
-    queries_text = gemini_generate(api_key=api_key, user_prompt=qry_prompt, system_prompt="Output plain queries, one per line.", temperature=0.1, max_output_tokens=200)
-    queries = [q.strip(" -•\n\r\t") for q in queries_text.splitlines() if q.strip()][:5]
-
-    # 3) retrieve context from RAG
     retrieved = []
     for q in queries:
         hits = rag.similarity_search(q, k=3)
         for h in hits:
             retrieved.append(h["text"])
-    # dedupe and trim
-    seen = set()
-    ctx_parts = []
-    for t in retrieved:
-        if t and t not in seen:
-            seen.add(t)
-            ctx_parts.append(t)
-    context_text = safe_trim("\n---\n".join(ctx_parts[:10]), 4000)
+    context_text = safe_trim("\n---\n".join(dict.fromkeys(retrieved)), 4000)
 
-    # 4) final predictive analysis with solution
     final_prompt = f"""
-You are an expert SRE specializing in predictive hardware failure analysis.
-
-Incident/Telemetry:
+Incident:
 {incident}
 
 Hypotheses:
 {hypotheses}
 
-Retrieved Evidence (from KB & logs):
+Evidence:
 {context_text if context_text else '[no retrieved context]'}
 
-Produce a concise predictive hardware failure analysis with exactly these sections:
-1) Root Cause (likely hardware issue or precursor)
-2) Prediction (probability and timeline for failure if trend continues)
-3) Evidence (bullet points linking metrics/logs)
-4) Immediate Actions (step-by-step commands/actions to mitigate risk now)
-5) Long-term Remediation & Monitoring (3 items)
-
-Be concrete and include commands where applicable (linux, ipmitool, vendor CLI) and keep answer concise.
+Write predictive analysis with:
+1) Root Cause
+2) Prediction
+3) Evidence
+4) Immediate Actions
+5) Long-term Remediation
 """
-    return gemini_generate(api_key=api_key, user_prompt=final_prompt, system_prompt="Deliver a sharp predictive RCA with actionable steps.", temperature=temperature, max_output_tokens=900)
+    return gemini_generate(api_key=api_key, user_prompt=final_prompt,
+                           system_prompt="Deliver predictive RCA with actionable steps.",
+                           temperature=temperature, max_output_tokens=900)
 
 # ---------- Streamlit UI ----------
 st.set_page_config(page_title="Predictive Hardware Failure Analysis", layout="wide")
 st.title("🔧 MANISH SINGH - Predictive Hardware Failure Analysis (Gemini + RAG + Agent)")
 
 with st.sidebar:
-    st.markdown("## 🔐 API Key")
     manual_key = st.text_input("Enter GEMINI_API_KEY (optional)", type="password", key="api_key_input")
     api_key = manual_key or get_api_key()
     if not api_key:
-        st.warning("Set GEMINI_API_KEY in Streamlit secrets or environment to call Gemini.")
-    st.markdown("---")
-    st.markdown("Upload logs, telemetry dumps, or runbooks (txt/pdf) to build an on-instance KB for RAG.")
+        st.warning("Set GEMINI_API_KEY in secrets or environment.")
+    uploaded_files = st.file_uploader("Upload .txt/.log/.pdf", accept_multiple_files=True, type=["txt", "log", "pdf"])
 
-uploaded_files = st.file_uploader("Upload files (.txt, .log, .pdf)", accept_multiple_files=True, type=["txt", "log", "pdf"])
 kb_texts: List[str] = []
 if uploaded_files:
     for uf in uploaded_files:
         try:
             if uf.name.lower().endswith((".txt", ".log")):
-                txt = uf.read().decode("utf-8", errors="ignore")
-                kb_texts.extend(chunk_text(txt, max_chars=1200))
+                kb_texts.extend(chunk_text(uf.read().decode("utf-8", errors="ignore")))
             elif uf.name.lower().endswith(".pdf"):
-                reader = None
-                try:
-                    reader = PdfReader(io.BytesIO(uf.read()))
-                    txt = []
-                    for p in reader.pages:
-                        txt.append(p.extract_text() or "")
-                    txt = "\n".join(txt)
-                    kb_texts.extend(chunk_text(txt, max_chars=1200))
-                except Exception:
-                    # fallback: raw bytes decode
-                    try:
-                        txt = uf.read().decode("utf-8", errors="ignore")
-                        kb_texts.extend(chunk_text(txt, max_chars=1200))
-                    except Exception:
-                        st.warning(f"Could not parse {uf.name}")
+                reader = PdfReader(io.BytesIO(uf.read()))
+                txt = "\n".join([p.extract_text() or "" for p in reader.pages])
+                kb_texts.extend(chunk_text(txt))
         except Exception as e:
             st.warning(f"Failed to read {uf.name}: {e}")
 
-# instantiate RAG
 rag = SimpleRAG()
 if kb_texts:
     rag.add_documents(kb_texts, [{"source": "upload"} for _ in kb_texts])
     try:
         rag.build()
-        st.success(f"Knowledge base ready with ~{len(kb_texts)} chunks.")
+        st.success(f"KB ready with {len(kb_texts)} chunks.")
     except Exception as e:
-        st.warning(f"RAG build failed (faiss/sentence-transformers may be missing): {e}. Falling back to keyword retrieval.")
+        st.warning(f"RAG build failed: {e}. Using keyword fallback.")
 
-incident_input = st.text_area("Paste telemetry/logs/incident description here (or a short summary):", height=240, key="incident_input")
-if st.button("Run Predictive Analysis", key="run_analysis"):
+incident_input = st.text_area("Paste telemetry/logs:", height=240, key="incident_input")
+if st.button("Run Predictive Analysis"):
     if not api_key:
         st.error("Gemini API key required.")
     elif not incident_input.strip():
-        st.warning("Please paste the telemetry or incident text to analyze.")
+        st.warning("Please paste telemetry.")
     else:
-        with st.spinner("Running agentic predictive analysis..."):
+        with st.spinner("Running predictive analysis..."):
             try:
-                report = agentic_predictive_pipeline(api_key=api_key, incident=incident_input.strip(), rag=rag, temperature=0.2)
+                report = agentic_predictive_pipeline(api_key=api_key, incident=incident_input.strip(), rag=rag)
             except Exception as e:
-                report = f"Error running analysis: {e}"
+                report = f"Error: {e}"
         st.subheader("📄 Predictive Hardware Failure Analysis")
         st.markdown(report)
 
