@@ -4,7 +4,7 @@ import requests
 import streamlit as st
 
 # ---------- Gemini Config ----------
-MODEL_NAME = "gemini-2.5-flash-preview-05-20"
+MODEL_NAME = "gemini-2.0-flash-lite"
 API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_NAME}:generateContent"
 
 def get_api_key():
