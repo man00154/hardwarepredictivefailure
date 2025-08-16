@@ -4,91 +4,60 @@ import io
 import json
 import requests
 import streamlit as st
-from typing import List
 from PyPDF2 import PdfReader
 
 # ---------- Gemini Config ----------
 MODEL_NAME = "gemini-2.5-flash-preview-05-20"
 API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_NAME}:generateContent"
 
-def get_api_key() -> str:
+def get_api_key():
     return os.getenv("GEMINI_API_KEY", st.secrets.get("GEMINI_API_KEY", ""))
 
-# ---------- Helpers ----------
-def chunk_text(text: str, max_chars: int = 800, overlap: int = 50) -> List[str]:
-    text = text.replace("\x00", "")
-    chunks, start = [], 0
-    while start < len(text):
-        end = min(start + max_chars, len(text))
-        chunks.append(text[start:end])
-        if end == len(text):
-            break
-        start = max(0, end - overlap)
-    return chunks
-
-# ---------- Simple RAG ----------
+# ---------- Lightweight RAG ----------
 class SimpleRAG:
     def __init__(self):
         self.docs = []
 
-    def add_documents(self, texts: List[str]):
-        for t in texts:
-            self.docs.append(t)
+    def add_documents(self, texts):
+        self.docs.extend(texts)
 
-    def similarity_search(self, query: str, k: int = 3):
-        q = query.lower().split()
+    def similarity_search(self, query, k=3):
+        q_words = query.lower().split()
         scored = []
         for d in self.docs:
-            score = sum(1 for w in q if w in d.lower())
+            score = sum(1 for w in q_words if w in d.lower())
             if score > 0:
                 scored.append((score, d))
         scored.sort(key=lambda x: -x[0])
         return [d for _, d in scored[:k]]
 
 # ---------- Gemini Client ----------
-def gemini_generate(api_key: str, user_prompt: str, system_prompt: str = "", max_output_tokens: int = 800) -> str:
+def gemini_generate(api_key, prompt, max_output_tokens=600):
     headers = {"Content-Type": "application/json"}
     params = {"key": api_key}
     payload = {
-        "contents": [
-            {"role": "user", "parts": [{"text": f"{system_prompt}\n{user_prompt}"}]}
-        ],
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
         "generationConfig": {"temperature": 0.2, "maxOutputTokens": max_output_tokens}
     }
-
-    resp = requests.post(API_URL, headers=headers, params=params, json=payload, timeout=60)
-    if resp.status_code != 200:
-        return f"API Error {resp.status_code}: {resp.text}"
-
-    data = resp.json()
     try:
-        # Try standard response
+        resp = requests.post(API_URL, headers=headers, params=params, json=payload, timeout=60)
+        data = resp.json()
         return data["candidates"][0]["content"]["parts"][0]["text"].strip()
-    except KeyError:
-        # Fallbacks
-        if "candidates" in data and "content" in data["candidates"][0]:
-            parts = data["candidates"][0]["content"].get("parts", [])
-            if parts and "text" in parts[0]:
-                return parts[0]["text"].strip()
-        if "promptFeedback" in data:
-            return f"⚠️ Model feedback: {json.dumps(data['promptFeedback'])}"
-        return f"⚠️ Unexpected response format: {json.dumps(data)[:500]}"
     except Exception as e:
-        return f"⚠️ Error parsing Gemini response: {str(e)}"
+        return f"⚠️ No valid response from Gemini: {str(e)}"
 
 # ---------- Agentic Pipeline ----------
-def agentic_pipeline(api_key: str, incident: str, rag: SimpleRAG) -> str:
-    # Step 1: Hypotheses
-    hypo = gemini_generate(api_key, f"Generate 3 short hypotheses for this incident:\n{incident}")
-    
-    # Step 2: Retrieve context
-    queries = hypo.splitlines()[:3]
+def agentic_pipeline(api_key, incident, rag):
+    # Hypotheses
+    hypo = gemini_generate(api_key, f"List 3 possible hypotheses for this incident:\n{incident}")
+
+    # Retrieve context
     context = []
-    for q in queries:
+    for q in hypo.splitlines()[:3]:
         context.extend(rag.similarity_search(q, k=2))
-    context_text = "\n---\n".join(context) if context else "[No context found]"
-    
-    # Step 3: Final Analysis
+    context_text = "\n---\n".join(context) if context else "No extra evidence."
+
+    # Final RCA
     final_prompt = f"""
 Incident:
 {incident}
@@ -99,7 +68,7 @@ Hypotheses:
 Evidence:
 {context_text}
 
-Write a predictive RCA with:
+Write a predictive RCA report including:
 1. Root Cause
 2. Prediction
 3. Evidence
@@ -110,49 +79,47 @@ Write a predictive RCA with:
     return gemini_generate(api_key, final_prompt)
 
 # ---------- Streamlit UI ----------
-st.set_page_config(page_title="Predictive Hardware Failure Analysis", layout="wide")
-st.title("🔧 MANISH SINGH - Predictive Hardware Failure Analysis (LLM+RAG+AGENTIC AI)")
+st.set_page_config(page_title="Predictive Hardware Failure RCA", layout="wide")
+st.title("🔧 MANISH SINGH - Predictive Hardware Failure RCA (LLM + RAG + Agentic AI)")
 
+# Sidebar
 with st.sidebar:
     api_key = st.text_input("Enter GEMINI_API_KEY", type="password") or get_api_key()
-    uploaded_files = st.file_uploader("Upload logs or PDFs", accept_multiple_files=True, type=["txt", "log", "pdf"])
+    uploaded_files = st.file_uploader("Upload logs/PDFs", accept_multiple_files=True, type=["txt", "log", "pdf"])
 
-# Build knowledge base
+# Build KB
 rag = SimpleRAG()
-kb_texts = []
 if uploaded_files:
     for uf in uploaded_files:
-        if uf.name.lower().endswith((".txt", ".log")):
-            kb_texts.extend(chunk_text(uf.read().decode("utf-8", errors="ignore")))
-        elif uf.name.lower().endswith(".pdf"):
+        if uf.name.endswith((".txt", ".log")):
+            rag.add_documents([uf.read().decode("utf-8", errors="ignore")])
+        elif uf.name.endswith(".pdf"):
             reader = PdfReader(io.BytesIO(uf.read()))
-            txt = "\n".join([p.extract_text() or "" for p in reader.pages])
-            kb_texts.extend(chunk_text(txt))
-if kb_texts:
-    rag.add_documents(kb_texts)
-    st.success(f"KB ready with {len(kb_texts)} chunks.")
+            text = "\n".join([p.extract_text() or "" for p in reader.pages])
+            rag.add_documents([text])
+    st.success(f"Knowledge base ready with {len(rag.docs)} documents.")
 
-# Incident input
+# Input
 incident_input = st.text_area("Paste telemetry/logs:", height=200)
 
-# Run analysis
+# Run Analysis
 if st.button("Run Analysis"):
     if not api_key:
         st.error("Please provide GEMINI_API_KEY.")
     elif not incident_input.strip():
         st.warning("Please paste telemetry.")
     else:
-        with st.spinner("Running predictive analysis..."):
+        with st.spinner("Running predictive RCA..."):
             report = agentic_pipeline(api_key, incident_input.strip(), rag)
         st.subheader("📄 Predictive RCA Report")
         st.markdown(report)
 
-# Example
+# Example Incident
 if st.button("Load Example Incident"):
-    st.session_state["incident_input"] = (
-        "Node: server-23\n"
-        "Metric: disk latency very high, SMART errors detected\n"
-        "Reallocated sector count increasing rapidly\n"
-        "Recent firmware update applied\n"
+    st.session_state.incident_input = (
+        "Node: server-42\n"
+        "Disk I/O latency spikes, SMART errors detected\n"
+        "Temperature higher than threshold\n"
+        "Fan speed anomalies in last 24 hours\n"
     )
     st.experimental_rerun()
