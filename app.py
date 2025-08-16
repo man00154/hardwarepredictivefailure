@@ -30,38 +30,53 @@ class SimpleRAG:
         scored.sort(key=lambda x: -x[0])
         return [d for _, d in scored[:k]]
 
-# ---------- Gemini Client ----------
-def gemini_generate(api_key, prompt, max_output_tokens=500):
+# ---------- Gemini Client with Retries ----------
+def gemini_generate(api_key, prompt, max_output_tokens=400):
     headers = {"Content-Type": "application/json"}
     params = {"key": api_key}
-    payload = {
-        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.2, "maxOutputTokens": max_output_tokens}
-    }
-    try:
-        resp = requests.post(API_URL, headers=headers, params=params, json=payload, timeout=60)
-        data = resp.json()
 
-        if "candidates" in data and data["candidates"]:
-            cand = data["candidates"][0]
-            if "content" in cand and "parts" in cand["content"]:
-                parts = cand["content"]["parts"]
-                if parts and "text" in parts[0]:
-                    return parts[0]["text"].strip()
+    # safety: trim input if too long
+    if len(prompt) > 4000:
+        prompt = prompt[:4000]
 
-        return "⚠️ Gemini API returned no usable text. Try reducing input size or tokens."
-    except Exception as e:
-        return f"⚠️ No valid response from Gemini: {str(e)}"
+    def call_gemini(tokens):
+        payload = {
+            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "generationConfig": {"temperature": 0.2, "maxOutputTokens": tokens}
+        }
+        try:
+            resp = requests.post(API_URL, headers=headers, params=params, json=payload, timeout=60)
+            data = resp.json()
+            if "candidates" in data and data["candidates"]:
+                cand = data["candidates"][0]
+                if "content" in cand and "parts" in cand["content"]:
+                    for part in cand["content"]["parts"]:
+                        if "text" in part:
+                            return part["text"].strip()
+            return None
+        except Exception:
+            return None
+
+    # Try with decreasing tokens
+    for tokens in [max_output_tokens, 200, 100]:
+        result = call_gemini(tokens)
+        if result:
+            return result
+
+    return "⚠️ Gemini API returned no usable text, even after retries. Please try again with smaller input."
 
 # ---------- Agentic Pipeline ----------
 def agentic_pipeline(api_key, incident, rag):
-    hypo = gemini_generate(api_key, f"List 3 possible hypotheses for this incident:\n{incident}")
+    # Step 1: Hypotheses
+    hypo = gemini_generate(api_key, f"List 3 possible hypotheses for this incident:\n{incident}", max_output_tokens=200)
 
+    # Step 2: Retrieve context
     context = []
     for q in hypo.splitlines()[:3]:
         context.extend(rag.similarity_search(q, k=2))
     context_text = "\n---\n".join(context) if context else "No extra evidence."
 
+    # Step 3: Final RCA
     final_prompt = f"""
 Incident:
 {incident}
@@ -80,7 +95,7 @@ Write a predictive RCA report including:
 5. Long-term Remediation
 6. Final Solution Summary
 """
-    return gemini_generate(api_key, final_prompt)
+    return gemini_generate(api_key, final_prompt, max_output_tokens=400)
 
 # ---------- Streamlit UI ----------
 st.set_page_config(page_title="Predictive Hardware Failure RCA", layout="wide")
