@@ -1,7 +1,6 @@
 # app.py
 import os
 import io
-import json
 import requests
 import streamlit as st
 from PyPDF2 import PdfReader
@@ -32,7 +31,7 @@ class SimpleRAG:
         return [d for _, d in scored[:k]]
 
 # ---------- Gemini Client ----------
-def gemini_generate(api_key, prompt, max_output_tokens=600):
+def gemini_generate(api_key, prompt, max_output_tokens=500):
     headers = {"Content-Type": "application/json"}
     params = {"key": api_key}
     payload = {
@@ -43,28 +42,26 @@ def gemini_generate(api_key, prompt, max_output_tokens=600):
         resp = requests.post(API_URL, headers=headers, params=params, json=payload, timeout=60)
         data = resp.json()
 
-        # ✅ Safer parsing
         if "candidates" in data and data["candidates"]:
             cand = data["candidates"][0]
-            if "content" in cand and "parts" in cand["content"] and cand["content"]["parts"]:
-                return cand["content"]["parts"][0].get("text", "").strip()
-        # If Gemini error
-        return f"⚠️ Gemini API returned no text. Full response: {json.dumps(data, indent=2)}"
+            if "content" in cand and "parts" in cand["content"]:
+                parts = cand["content"]["parts"]
+                if parts and "text" in parts[0]:
+                    return parts[0]["text"].strip()
+
+        return "⚠️ Gemini API returned no usable text. Try reducing input size or tokens."
     except Exception as e:
         return f"⚠️ No valid response from Gemini: {str(e)}"
 
 # ---------- Agentic Pipeline ----------
 def agentic_pipeline(api_key, incident, rag):
-    # Hypotheses
     hypo = gemini_generate(api_key, f"List 3 possible hypotheses for this incident:\n{incident}")
 
-    # Retrieve context
     context = []
     for q in hypo.splitlines()[:3]:
         context.extend(rag.similarity_search(q, k=2))
     context_text = "\n---\n".join(context) if context else "No extra evidence."
 
-    # Final RCA
     final_prompt = f"""
 Incident:
 {incident}
@@ -89,7 +86,6 @@ Write a predictive RCA report including:
 st.set_page_config(page_title="Predictive Hardware Failure RCA", layout="wide")
 st.title("🔧 MANISH SINGH - Predictive Hardware Failure RCA (LLM + RAG + Agentic AI)")
 
-# Sidebar
 with st.sidebar:
     api_key = st.text_input("Enter GEMINI_API_KEY", type="password") or get_api_key()
     uploaded_files = st.file_uploader("Upload logs/PDFs", accept_multiple_files=True, type=["txt", "log", "pdf"])
