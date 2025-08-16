@@ -97,7 +97,7 @@ Write a predictive RCA with:
 
 # ---------- Streamlit UI ----------
 st.set_page_config(page_title="Predictive Hardware Failure Analysis", layout="wide")
-st.title("🔧 MANISH SINGH - Predictive Hardware Failure Analysis (Simplified)")
+st.title("🔧 MANISH SINGH - Predictive Hardware Failure Analysis (LLM+RAG+AGENTIC AI)")
 
 with st.sidebar:
     api_key = st.text_input("Enter GEMINI_API_KEY", type="password") or get_api_key()
