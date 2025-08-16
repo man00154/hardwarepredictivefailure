@@ -1,7 +1,6 @@
 # app.py
 import os
 import io
-import json
 import requests
 import streamlit as st
 from typing import List
@@ -64,17 +63,13 @@ def gemini_generate(api_key: str, user_prompt: str, system_prompt: str = "", max
 
 # ---------- Agentic Pipeline ----------
 def agentic_pipeline(api_key: str, incident: str, rag: SimpleRAG) -> str:
-    # Step 1: Hypotheses
     hypo = gemini_generate(api_key, f"Generate 3 short hypotheses for this incident:\n{incident}")
-    
-    # Step 2: Retrieve context
     queries = hypo.splitlines()[:3]
     context = []
     for q in queries:
         context.extend(rag.similarity_search(q, k=2))
     context_text = "\n---\n".join(context) if context else "[No context found]"
     
-    # Step 3: Final Analysis
     final_prompt = f"""
 Incident:
 {incident}
@@ -119,7 +114,10 @@ if kb_texts:
     st.success(f"KB ready with {len(kb_texts)} chunks.")
 
 # Incident input
-incident_input = st.text_area("Paste telemetry/logs:", height=200)
+if "incident_example" not in st.session_state:
+    st.session_state["incident_example"] = ""
+
+incident_input = st.text_area("Paste telemetry/logs:", value=st.session_state["incident_example"], height=200)
 
 # Run analysis
 if st.button("Run Analysis"):
@@ -141,4 +139,5 @@ if st.button("Load Example Incident"):
         "Reallocated sector count increasing rapidly\n"
         "Recent firmware update applied\n"
     )
-    st.experimental_rerun()
+    st.experimental_set_query_params(example_loaded="true")
+    st.rerun()
