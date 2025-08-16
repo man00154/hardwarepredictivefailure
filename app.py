@@ -77,20 +77,28 @@ class SimpleRAG:
         import numpy as np, faiss
         self.emb_model = SentenceTransformer(self.model_name)
         corpus = [d["text"] for d in self.docs]
-        embeddings = self.emb_model.encode(corpus, show_progress_bar=False, convert_to_numpy=True, normalize_embeddings=True)
+        embeddings = self.emb_model.encode(
+            corpus, show_progress_bar=False, convert_to_numpy=True, normalize_embeddings=True
+        )
         dim = int(embeddings.shape[1])
         self.index = faiss.IndexFlatIP(dim)
         self.index.add(embeddings.astype("float32"))
 
     def similarity_search(self, query: str, k: int = 5) -> List[Dict[str, Any]]:
         if self.using_faiss and self.index is not None:
-            q_emb = self.emb_model.encode([query], show_progress_bar=False, convert_to_numpy=True, normalize_embeddings=True).astype("float32")
+            q_emb = self.emb_model.encode(
+                [query], show_progress_bar=False, convert_to_numpy=True, normalize_embeddings=True
+            ).astype("float32")
             D, I = self.index.search(q_emb, k)
             results = []
             for score, idx in zip(D[0], I[0]):
                 if idx == -1:
                     continue
-                results.append({"text": self.docs[int(idx)]["text"], "metadata": self.docs[int(idx)].get("metadata", {}), "score": float(score)})
+                results.append({
+                    "text": self.docs[int(idx)]["text"],
+                    "metadata": self.docs[int(idx)].get("metadata", {}),
+                    "score": float(score),
+                })
             return results
         q = query.lower().split()
         scored = []
@@ -107,7 +115,11 @@ async def gemini_generate_async(api_key: str, user_prompt: str, system_prompt: O
                                 temperature: float = 0.2, max_output_tokens: int = 1200, retries: int = 2) -> str:
     headers = {"Content-Type": "application/json"}
     params = {"key": api_key}
-    concise_guardrail = "Be concise. Use explicit sections: Root Cause, Prediction, Evidence, Immediate Action, Long-term Mitigation."
+    concise_guardrail = (
+        "Be structured. Always include explicit sections:\n"
+        "1. Root Cause\n2. Prediction (Future Risk)\n3. Evidence (from logs/context)\n"
+        "4. Immediate Actions\n5. Long-term Remediation\n6. Final Solution Summary"
+    )
 
     for attempt in range(retries + 1):
         effective_max = max(256, int(max_output_tokens * (0.7 ** attempt)))
@@ -117,10 +129,14 @@ async def gemini_generate_async(api_key: str, user_prompt: str, system_prompt: O
         else:
             parts.append({"text": concise_guardrail})
         parts.append({"text": user_prompt})
-        payload = {"contents": [{"role": "user", "parts": parts}],
-                   "generationConfig": {"temperature": temperature,
-                                        "maxOutputTokens": effective_max,
-                                        "responseMimeType": "text/plain"}}
+        payload = {
+            "contents": [{"role": "user", "parts": parts}],
+            "generationConfig": {
+                "temperature": temperature,
+                "maxOutputTokens": effective_max,
+                "responseMimeType": "text/plain"
+            }
+        }
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(API_URL, headers=headers, params=params, json=payload, timeout=120) as resp:
@@ -157,12 +173,22 @@ def gemini_generate(*args, **kwargs) -> str:
 # ---------- Agentic pipeline ----------
 def agentic_predictive_pipeline(api_key: str, incident: str, rag: SimpleRAG, temperature: float = 0.2) -> str:
     hypo_prompt = f"You are a data center engineer. Give 3 short hypotheses for the incident:\n{incident}"
-    hypotheses = gemini_generate(api_key=api_key, user_prompt=hypo_prompt, system_prompt="Generate 3 short hypotheses.",
-                                 temperature=temperature, max_output_tokens=200)
+    hypotheses = gemini_generate(
+        api_key=api_key,
+        user_prompt=hypo_prompt,
+        system_prompt="Generate 3 short hypotheses.",
+        temperature=temperature,
+        max_output_tokens=200,
+    )
 
     qry_prompt = f"From these hypotheses, make up to 5 search queries (one per line):\n{hypotheses}"
-    queries_text = gemini_generate(api_key=api_key, user_prompt=qry_prompt, system_prompt="Output queries only.",
-                                   temperature=0.1, max_output_tokens=200)
+    queries_text = gemini_generate(
+        api_key=api_key,
+        user_prompt=qry_prompt,
+        system_prompt="Output queries only.",
+        temperature=0.1,
+        max_output_tokens=200,
+    )
     queries = [q.strip() for q in queries_text.splitlines() if q.strip()][:5]
 
     retrieved = []
@@ -179,19 +205,24 @@ Incident:
 Hypotheses:
 {hypotheses}
 
-Evidence:
+Evidence (retrieved context):
 {context_text if context_text else '[no retrieved context]'}
 
-Write predictive analysis with:
+Write a predictive analysis including:
 1) Root Cause
-2) Prediction
-3) Evidence
+2) Prediction (future risk if unaddressed)
+3) Evidence (from logs/context)
 4) Immediate Actions
 5) Long-term Remediation
+6) Final Solution Summary (clear resolution in 2–3 sentences)
 """
-    return gemini_generate(api_key=api_key, user_prompt=final_prompt,
-                           system_prompt="Deliver predictive RCA with actionable steps.",
-                           temperature=temperature, max_output_tokens=900)
+    return gemini_generate(
+        api_key=api_key,
+        user_prompt=final_prompt,
+        system_prompt="Deliver predictive RCA and a solution summary with actionable steps.",
+        temperature=temperature,
+        max_output_tokens=900,
+    )
 
 # ---------- Streamlit UI ----------
 st.set_page_config(page_title="Predictive Hardware Failure Analysis", layout="wide")
