@@ -1,7 +1,3 @@
 streamlit
-aiohttp
-python-dotenv
-pypdf2
-sentence-transformers
-faiss-cpu
-numpy
+requests
+PyPDF2
