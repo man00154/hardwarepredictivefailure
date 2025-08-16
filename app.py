@@ -1,6 +1,7 @@
 # app.py
 import os
 import io
+import json
 import requests
 import streamlit as st
 from typing import List
@@ -49,27 +50,45 @@ def gemini_generate(api_key: str, user_prompt: str, system_prompt: str = "", max
     headers = {"Content-Type": "application/json"}
     params = {"key": api_key}
     payload = {
-        "contents": [{"role": "user", "parts": [{"text": f"{system_prompt}\n{user_prompt}"}]}],
+        "contents": [
+            {"role": "user", "parts": [{"text": f"{system_prompt}\n{user_prompt}"}]}
+        ],
         "generationConfig": {"temperature": 0.2, "maxOutputTokens": max_output_tokens}
     }
+
     resp = requests.post(API_URL, headers=headers, params=params, json=payload, timeout=60)
     if resp.status_code != 200:
         return f"API Error {resp.status_code}: {resp.text}"
+
     data = resp.json()
     try:
+        # Try standard response
         return data["candidates"][0]["content"]["parts"][0]["text"].strip()
-    except Exception:
-        return "⚠️ No valid response from Gemini."
+    except KeyError:
+        # Fallbacks
+        if "candidates" in data and "content" in data["candidates"][0]:
+            parts = data["candidates"][0]["content"].get("parts", [])
+            if parts and "text" in parts[0]:
+                return parts[0]["text"].strip()
+        if "promptFeedback" in data:
+            return f"⚠️ Model feedback: {json.dumps(data['promptFeedback'])}"
+        return f"⚠️ Unexpected response format: {json.dumps(data)[:500]}"
+    except Exception as e:
+        return f"⚠️ Error parsing Gemini response: {str(e)}"
 
 # ---------- Agentic Pipeline ----------
 def agentic_pipeline(api_key: str, incident: str, rag: SimpleRAG) -> str:
+    # Step 1: Hypotheses
     hypo = gemini_generate(api_key, f"Generate 3 short hypotheses for this incident:\n{incident}")
+    
+    # Step 2: Retrieve context
     queries = hypo.splitlines()[:3]
     context = []
     for q in queries:
         context.extend(rag.similarity_search(q, k=2))
     context_text = "\n---\n".join(context) if context else "[No context found]"
     
+    # Step 3: Final Analysis
     final_prompt = f"""
 Incident:
 {incident}
@@ -114,10 +133,7 @@ if kb_texts:
     st.success(f"KB ready with {len(kb_texts)} chunks.")
 
 # Incident input
-if "incident_example" not in st.session_state:
-    st.session_state["incident_example"] = ""
-
-incident_input = st.text_area("Paste telemetry/logs:", value=st.session_state["incident_example"], height=200)
+incident_input = st.text_area("Paste telemetry/logs:", height=200)
 
 # Run analysis
 if st.button("Run Analysis"):
@@ -133,11 +149,10 @@ if st.button("Run Analysis"):
 
 # Example
 if st.button("Load Example Incident"):
-    st.session_state["incident_example"] = (
+    st.session_state["incident_input"] = (
         "Node: server-23\n"
         "Metric: disk latency very high, SMART errors detected\n"
         "Reallocated sector count increasing rapidly\n"
         "Recent firmware update applied\n"
     )
-    st.experimental_set_query_params(example_loaded="true")
-    st.rerun()
+    st.experimental_rerun()
