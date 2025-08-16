@@ -48,7 +48,7 @@ def gemini_generate(api_key, prompt, max_tokens=300):
 
 # ---------- Streamlit UI ----------
 st.set_page_config(page_title="Predictive Hardware Failure RCA", layout="wide")
-st.title("🔧 MANISH SINGH - Predictive Hardware Failure RCA")
+st.title("🔧 MANISH SINGH - Predictive DATA CENTER Hardware Failure RCA")
 
 # Get API key automatically (no manual entry)
 api_key = get_api_key()
